@@ -88,7 +88,7 @@ if command == ".dbinfo":
 elif command == ".tables":
     with open(database_file_path, "rb") as database_file:
         table_names = get_table_names(database_file)
-        print(f"{"".join(table_names)}")
+        print(f"{" ".join(table_names)}")
 else:
     print(f"Invalid command: {command}")
 
