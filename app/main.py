@@ -10,7 +10,7 @@ def read_varint(stream, bytes_list, offset: int):
     byte = int.from_bytes(stream.read(1), "big")
     read_next = byte >> 7 == 1
     if read_next:
-        bytes_list.append(byte ^ 0b10000000)
+        bytes_list.append(byte ^ 0b10000000) #xor to toggle msb
         return read_varint(stream, bytes_list, offset + 1)
     bytes_list.append(byte)
     return (int.from_bytes(bytes(bytes_list), byteorder="big"), offset + 1)
@@ -88,7 +88,7 @@ if command == ".dbinfo":
 elif command == ".tables":
     with open(database_file_path, "rb") as database_file:
         table_names = get_table_names(database_file)
-        print(f"{table_names}")
+        print(f"{"".join(table_names)}")
 else:
     print(f"Invalid command: {command}")
 
