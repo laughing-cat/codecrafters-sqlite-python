@@ -148,7 +148,7 @@ elif command == ".tables":
     with open(database_file_path, "rb") as database_file:
         table_names = get_table_names(database_file)
         print(f"{' '.join(table_names)}")
-elif "SELECT" in command:
+elif "select" in command or "SELECT" in command:
     with open(database_file_path, "rb") as database_file:
         table_name = command.split(" ")[-1]
         print(f"{get_row_count_in_table(database_file, table_name)}")
