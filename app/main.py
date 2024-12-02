@@ -120,7 +120,7 @@ def get_row_count_in_table(database_file, table_name):
         record = Record(database_file, offset)
         name = record.content[2].decode("utf-8")
         if name == table_name:
-            page_number = record.root_page
+            page_number = record.root_page - 1 # root page is 1-indexed
             break
     # go to page
     return get_num_tables(database_file, page_number * 4096)
