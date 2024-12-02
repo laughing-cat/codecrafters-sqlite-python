@@ -1,6 +1,5 @@
 import sys
-
-# import sqlparse - available if you need it!
+# import sqlparse
 
 # how to read varint? bitwise operations, read first bit. if it's
 # 1, then the following byte is part of the same varint. if it is
@@ -52,6 +51,7 @@ class Record:
             self.content[index] = content
             cur_offset += size
 
+        self.root_page:int = int.from_bytes(self.content[3], byteorder = "big")
         # TODO: Get overflow page number
         # database_file.seek(next_offset)
         # self.overflow_page_number: int = int.from_bytes(database_file.read(4),
@@ -87,35 +87,43 @@ class Record:
         else:
             return -1
 
-def parse_record_serial(serial:int) -> int:
-    if serial % 2 == 0:
-        return (serial - 12) // 2
-    elif serial % 2 == 1:
-        return (serial - 13) // 2
-    return -1
-
-def get_num_tables(database_file):
-    # skip the file header to num cells in page header
-    # 100 = file header offset (bytes)
-    # 3 = cell number offset
-    database_file.seek(103)
-    num_tables = int.from_bytes(database_file.read(2), byteorder="big")
-    return num_tables
-
-def get_table_names(database_file):
-    num_tables = get_num_tables(database_file)
+def get_cell_offsets(database_file):
+    num_tables = get_num_tables(database_file, 100)
     # seek past page header - page header is 8 bytes, but 8th byte is empty
         # in non-interior pages
     database_file.seek(108)
     cell_offsets = [int.from_bytes(database_file.read(2), byteorder="big")
                     for _ in range(0, num_tables)]
+    return cell_offsets
+
+def get_num_tables(database_file, page_start_offset):
+    # skip the file header to num cells in page header
+    # 100 = file header offset (bytes)
+    # 3 = cell number offset
+    database_file.seek(page_start_offset + 3)
+    num_tables = int.from_bytes(database_file.read(2), byteorder="big")
+    return num_tables
+
+def get_table_names(database_file):
+    cell_offsets = get_cell_offsets(database_file)
     cell_contents = []
     for offset in cell_offsets:
         record = Record(database_file, offset)
-        # database_file.seek(offset)
-
         cell_contents.append(record.content[2].decode("utf-8"))
     return cell_contents
+
+def get_row_count_in_table(database_file, table_name):
+    cell_offsets = get_cell_offsets(database_file)
+    row_count = 0
+    page_number = 0
+    for offset in cell_offsets:
+        record = Record(database_file, offset)
+        name = record.content[2].decode("utf-8")
+        if name == table_name:
+            page_number = record.root_page
+            break
+    # go to page
+    return get_num_tables(database_file, page_number * 4096)
 
 
 database_file_path = sys.argv[1]
@@ -131,7 +139,7 @@ if command == ".dbinfo":
         database_file.seek(100)
         print(f"page header: {int.from_bytes(database_file.read(1), byteorder='big')}")
 
-        num_tables = get_num_tables(database_file)
+        num_tables = get_num_tables(database_file, 100)
 
         print(f"database page size: {page_size}")
         print(f"number of tables: {num_tables}")
@@ -140,6 +148,10 @@ elif command == ".tables":
     with open(database_file_path, "rb") as database_file:
         table_names = get_table_names(database_file)
         print(f"{' '.join(table_names)}")
+elif "SELECT" in command:
+    with open(database_file_path, "rb") as database_file:
+        table_name = command.split(" ")[-1]
+        print(f"{get_row_count_in_table(database_file, table_name)}")
 else:
     print(f"Invalid command: {command}")
 
