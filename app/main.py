@@ -1,9 +1,10 @@
 import sys
 
-from dataclasses import dataclass
-from typing import List
-
 # import sqlparse - available if you need it!
+
+# how to read varint? bitwise operations, read first bit. if it's
+# 1, then the following byte is part of the same varint. if it is
+# 0, the current byte is the last byte in the varint
 def read_varint(stream, bytes_list, offset: int):
     # check msb of current byte 
     stream.seek(offset)
@@ -14,6 +15,77 @@ def read_varint(stream, bytes_list, offset: int):
         return read_varint(stream, bytes_list, offset + 1)
     bytes_list.append(byte)
     return (int.from_bytes(bytes(bytes_list), byteorder="big"), offset + 1)
+
+# Record -> row of table
+# https://www.sqlite.org/fileformat.html#record_format
+class Record:
+    # Currently assumes the cell is a table B-Tree Leaf Cell
+    def __init__(self, database_file, cell_offset):
+        self.offset: int = cell_offset
+        self.column_sizes: list[int] = []
+        self.content: dict[int, bytes] = dict()
+
+        # parse cell header
+        record_size, next_offset = read_varint(database_file, [], cell_offset)
+        self.record_size: int = record_size
+
+        row_id, next_offset = read_varint(database_file, [], next_offset)
+        self.row_id: int = row_id
+
+        # start of record
+        record_offset = next_offset
+        record_header_size, next_offset = read_varint(database_file, [],
+                                                      next_offset)
+        self.record_header_size: int = record_header_size
+
+        cur_offset = next_offset
+        while cur_offset - record_offset < record_header_size:
+            # read next varint, parse serial type to get content_size
+            next_serial, cur_offset = read_varint(database_file, [], cur_offset)
+            content_size = self.parse_serial(next_serial)
+            self.column_sizes.append(content_size)
+
+        # parse record content
+        for index, size in enumerate(self.column_sizes):
+            database_file.seek(cur_offset)
+            content = database_file.read(size)
+            self.content[index] = content
+            cur_offset += size
+
+        # TODO: Get overflow page number
+        # database_file.seek(next_offset)
+        # self.overflow_page_number: int = int.from_bytes(database_file.read(4),
+        #                                                 byteorder = "big")
+
+    def parse_serial(self, serial:int) -> int:
+        if serial == 0:
+            # Value is a NULL
+            return 0
+        elif serial == 1:
+            # Value is an 8-bit twos-complement integer
+            return 1
+        elif serial == 2:
+            return 2
+        elif serial == 3:
+            return 3
+        elif serial == 4:
+            return 4
+        elif serial == 5:
+            return 6
+        elif serial == 6:
+            return 8
+        elif serial == 7:
+            return 8
+        elif serial == 8:
+            return 0
+        elif serial == 9:
+            return 0
+        elif serial % 2 == 0:
+            return (serial - 12) // 2
+        elif serial % 2 == 1:
+            return (serial - 13) // 2
+        else:
+            return -1
 
 def parse_record_serial(serial:int) -> int:
     if serial % 2 == 0:
@@ -39,31 +111,10 @@ def get_table_names(database_file):
                     for _ in range(0, num_tables)]
     cell_contents = []
     for offset in cell_offsets:
-        database_file.seek(offset)
-        # how to read varint? bitwise operations, read first bit. if it's
-        # 1, then the following byte is part of the same varint. if it is
-        # 0, the current byte is the last byte in the varint
-        # then save the num of bytes of the above 2 varints, add them to offset
-        # to table name later
-        record_size, next_offset = read_varint(database_file, [], offset)
-        record_size_varint_size = next_offset - offset
-        row_id, row_id_offset = read_varint(database_file, [], next_offset)
-        row_id_varint_size = row_id_offset - next_offset
-        next_offset = row_id_offset
-        record_header_size, next_offset = read_varint(database_file, [],
-                                                      next_offset)
-        schema_type, next_offset = read_varint(database_file, [],
-                                               next_offset)
-        schema_name, next_offset = read_varint(database_file, [],
-                                               next_offset)
-        table_name, next_offset = read_varint(database_file, [],
-                                              next_offset)
-        bytes_to_table_name = parse_record_serial(schema_type) + parse_record_serial(schema_name)
-        table_name_length = parse_record_serial(table_name)
+        record = Record(database_file, offset)
+        # database_file.seek(offset)
 
-        name_offset = offset + record_header_size + bytes_to_table_name + record_size_varint_size + row_id_varint_size
-        database_file.seek(name_offset)
-        cell_contents.append(database_file.read(table_name_length).decode("utf-8"))
+        cell_contents.append(record.content[2].decode("utf-8"))
     return cell_contents
 
 
@@ -88,7 +139,7 @@ if command == ".dbinfo":
 elif command == ".tables":
     with open(database_file_path, "rb") as database_file:
         table_names = get_table_names(database_file)
-        print(f"{" ".join(table_names)}")
+        print(f"{' '.join(table_names)}")
 else:
     print(f"Invalid command: {command}")
 
