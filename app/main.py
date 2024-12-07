@@ -1,5 +1,5 @@
 import sys
-# import sqlparse
+import sqlparse
 
 # how to read varint? bitwise operations, read first bit. if it's
 # 1, then the following byte is part of the same varint. if it is
@@ -28,7 +28,7 @@ class Database:
 
     def __init__(self, database_file):
         self.pages = []
-        self.table_to_root_page = {}
+        self.table_to_metadata = {}
         # parse file header
         database_file.seek(16)  # Skip the first 16 bytes of the header
         self.page_size = int.from_bytes(database_file.read(2), byteorder="big")
@@ -49,20 +49,42 @@ class Database:
         for cell in schema_table.cells:
             name = cell.content[2].decode("utf-8")
             root_page:int = int.from_bytes(cell.content[3], byteorder = "big")
-            self.table_to_root_page[name] = root_page
+            sql_query = cell.content[4].decode("utf-8")
+            self.table_to_metadata[name] = TableMetadata(root_page, sql_query)
+
     
     def get_rows_in_table(self, table_name):
-        table_root_page = self.table_to_root_page[table_name]
-        if table_root_page is None:
+        table_metadata = self.table_to_metadata[table_name]
+        if table_metadata is None:
             print(f"table not found: {table_name}")
             return -1
-        return self.pages[table_root_page - 1].num_cells
+        return self.pages[table_metadata.root_page - 1].num_cells
 
     def table_count(self):
         return self.pages[0].num_cells
 
+    def get_col_values_from_table(self, col, table_name):
+        table_metadata = self.table_to_metadata[table_name]
+        if table_metadata is None:
+            print(f"table not found: {table_name}")
+            return []
+        col_index = -1
+        for index, name in enumerate(table_metadata.col_names):
+            if col in name:
+                col_index = index
+                break
+        if col_index == -1:
+            print(f"column not found: {col}")
+            return []
+        page = self.pages[table_metadata.root_page - 1]
+        return [cell.content[col_index].decode("utf-8") for cell in page.cells]
 
-    
+class TableMetadata:
+    def __init__(self, root_page, sql_query):
+        self.root_page = root_page
+        self.sql_query = sql_query
+        query = sqlparse.parse(self.sql_query)[0]
+        self.col_names = query[-1].value.split(',')
 
 class Page:
     def __init__(self, database_file, page_offset):
@@ -83,6 +105,9 @@ class Page:
                     for _ in range(0, self.num_cells)]
 
         for offset in cell_offsets:
+            # NOTE: offsets are relative to start of page, need to add page number * page size
+            if page_offset != 100:
+                offset += page_offset
             database_file.seek(offset)
             record = Record(database_file, offset)
             self.cells.append(record)
@@ -96,6 +121,7 @@ class Record:
         self.offset: int = cell_offset
         self.column_sizes: list[int] = []
         self.content: dict[int, bytes] = dict()
+        database_file.seek(cell_offset)
 
         # parse cell header
         record_size, next_offset = read_varint(database_file, [], cell_offset)
@@ -176,7 +202,7 @@ if command == ".dbinfo":
 elif command == ".tables":
     with open(database_file_path, "rb") as database_file:
         database = Database(database_file)
-        table_names = database.table_to_root_page.keys()
+        table_names = database.table_to_metadata.keys()
         print(f"{' '.join(table_names)}")
 elif "select" in command or "SELECT" in command:
     if "count" in command or "COUNT" in command:
@@ -186,9 +212,13 @@ elif "select" in command or "SELECT" in command:
             print(f"{database.get_rows_in_table(table_name)}")
     else:
         with open(database_file_path, "rb") as database_file:
-            table_name = command.split(" ")[-1]
+            tokens = command.split(" ")
+            table_name = tokens[-1]
             # Get col from table
+            col_name = tokens[1]
             database = Database(database_file)
+            values = database.get_col_values_from_table(col_name, table_name)
+            print("\n".join(values))
 
 else:
     print(f"Invalid command: {command}")
