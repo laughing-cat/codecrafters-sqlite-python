@@ -20,7 +20,73 @@ def read_varint(stream, bytes_list, offset: int):
     result = int(''.join(bytes_list), 2)
     return (result, next_offset)
 
+
+
+# Database file representation: https://www.sqlite.org/fileformat.html
+class Database:
+
+
+    def __init__(self, database_file):
+        self.pages = []
+        self.table_to_root_page = {}
+        # parse file header
+        database_file.seek(16)  # Skip the first 16 bytes of the header
+        self.page_size = int.from_bytes(database_file.read(2), byteorder="big")
+        # in-header database size in pages
+        database_file.seek(28)
+        self.database_size = int.from_bytes(database_file.read(4),
+                                            byteorder="big")
+        # parse every page
+        for i in range(self.database_size):
+            page_offset = i * self.page_size
+            if page_offset == 0:
+                page_offset = 100
+            page = Page(database_file, page_offset)
+            self.pages.append(page)
+        
+        # parse schema table
+        schema_table = self.pages[0]
+        for cell in schema_table.cells:
+            name = cell.content[2].decode("utf-8")
+            root_page:int = int.from_bytes(cell.content[3], byteorder = "big")
+            self.table_to_root_page[name] = root_page
     
+    def get_rows_in_table(self, table_name):
+        table_root_page = self.table_to_root_page[table_name]
+        if table_root_page is None:
+            print(f"table not found: {table_name}")
+            return -1
+        return self.pages[table_root_page - 1].num_cells
+
+    def table_count(self):
+        return self.pages[0].num_cells
+
+
+    
+
+class Page:
+    def __init__(self, database_file, page_offset):
+        self.cells = []
+        database_file.seek(page_offset)
+        self.page_type = int.from_bytes(database_file.read(1), byteorder='big')
+        self.first_freeblock = int.from_bytes(database_file.read(2),
+                                              byteorder='big')
+        self.num_cells = int.from_bytes(database_file.read(2), byteorder='big')
+        self.start_content = int.from_bytes(database_file.read(2), byteorder='big')
+        if self.start_content == 0:
+            self.start_content = 65536
+        self.free_bytes = int.from_bytes(database_file.read(1), byteorder='big')
+        # TODO: parse right-most pointer here if interior b-tree page
+        
+        # parse cells of page
+        cell_offsets = [int.from_bytes(database_file.read(2), byteorder="big")
+                    for _ in range(0, self.num_cells)]
+
+        for offset in cell_offsets:
+            database_file.seek(offset)
+            record = Record(database_file, offset)
+            self.cells.append(record)
+        
 
 # Record -> row of table
 # https://www.sqlite.org/fileformat.html#record_format
@@ -58,9 +124,8 @@ class Record:
             self.content[index] = content
             cur_offset += size
 
-        self.root_page:int = int.from_bytes(self.content[3], byteorder = "big")
-        self.create_table_statement = self.content[4].decode('utf-8')
-        print(self.create_table_statement)
+        # self.root_page:int = int.from_bytes(self.content[3], byteorder = "big")
+        # self.create_table_statement = self.content[4].decode('utf-8')
         # TODO: Get overflow page number
         # database_file.seek(next_offset)
         # self.overflow_page_number: int = int.from_bytes(database_file.read(4),
@@ -95,87 +160,35 @@ class Record:
         else:
             return -1
 
-def get_cell_offsets(database_file):
-    num_tables = get_num_tables(database_file, 100)
-    # seek past page header - page header is 8 bytes, but 8th byte is empty
-        # in non-interior pages
-    database_file.seek(108)
-    cell_offsets = [int.from_bytes(database_file.read(2), byteorder="big")
-                    for _ in range(0, num_tables)]
-    return cell_offsets
-
-def get_num_tables(database_file, page_start_offset):
-    # skip the file header to num cells in page header
-    # 100 = file header offset (bytes)
-    # 3 = cell number offset
-    database_file.seek(page_start_offset + 3)
-    num_tables = int.from_bytes(database_file.read(2), byteorder="big")
-    return num_tables
-
-def get_table_names(database_file):
-    cell_offsets = get_cell_offsets(database_file)
-    cell_contents = []
-    for offset in cell_offsets:
-        record = Record(database_file, offset)
-        cell_contents.append(record.content[2].decode("utf-8"))
-    return cell_contents
-
-def get_row_count_in_table(database_file, table_name):
-    cell_offsets = get_cell_offsets(database_file)
-    row_count = 0
-    page_number = 0
-    for offset in cell_offsets:
-        record = Record(database_file, offset)
-        name = record.content[2].decode("utf-8")
-        if name == table_name:
-            page_number = record.root_page - 1
-            break
-    # go to page
-    return get_num_tables(database_file, page_number * 4096)
-
-def get_rows_from_table_at_col(database_file, table_name, col_name):
-    cell_offsets = get_cell_offsets(database_file)
-    row_count = 0
-    page_number = 0
-    for offset in cell_offsets:
-        record = Record(database_file, offset)
-        name = record.content[2].decode("utf-8")
-        if name == table_name:
-            page_number = record.root_page - 1
-            break
-    # go to page
-
 database_file_path = sys.argv[1]
 command = sys.argv[2]
 
 if command == ".dbinfo":
     with open(database_file_path, "rb") as database_file:
-        # You can use print statements as follows for debugging, they'll be visible when running tests.
-        print("Logs from your program will appear here!", file=sys.stderr)
+        database = Database(database_file)
+        page_size = database.page_size
 
-        database_file.seek(16)  # Skip the first 16 bytes of the header
-        page_size = int.from_bytes(database_file.read(2), byteorder="big")
-        database_file.seek(100)
-        print(f"page header: {int.from_bytes(database_file.read(1), byteorder='big')}")
-
-        num_tables = get_num_tables(database_file, 100)
+        num_tables = database.table_count()
 
         print(f"database page size: {page_size}")
         print(f"number of tables: {num_tables}")
 
 elif command == ".tables":
     with open(database_file_path, "rb") as database_file:
-        table_names = get_table_names(database_file)
+        database = Database(database_file)
+        table_names = database.table_to_root_page.keys()
         print(f"{' '.join(table_names)}")
 elif "select" in command or "SELECT" in command:
     if "count" in command or "COUNT" in command:
         with open(database_file_path, "rb") as database_file:
             table_name = command.split(" ")[-1]
-            print(f"{get_row_count_in_table(database_file, table_name)}")
+            database = Database(database_file)
+            print(f"{database.get_rows_in_table(table_name)}")
     else:
         with open(database_file_path, "rb") as database_file:
             table_name = command.split(" ")[-1]
             # Get col from table
+            database = Database(database_file)
 
 else:
     print(f"Invalid command: {command}")
