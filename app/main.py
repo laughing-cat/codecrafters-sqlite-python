@@ -7,13 +7,20 @@ import sys
 def read_varint(stream, bytes_list, offset: int):
     # check msb of current byte 
     stream.seek(offset)
-    byte = int.from_bytes(stream.read(1), "big")
-    read_next = byte >> 7 == 1
-    if read_next:
-        bytes_list.append(byte ^ 0b10000000) #xor to toggle msb
-        return read_varint(stream, bytes_list, offset + 1)
-    bytes_list.append(byte)
-    return (int.from_bytes(bytes(bytes_list), byteorder="big"), offset + 1)
+    next_offset = offset
+    while True:
+        byte = ord(stream.read(1))
+        next_offset = next_offset + 1
+        if byte >> 7 == 1:
+            bytes_list.append(format((byte ^ 128), '07b'))
+        else:
+            bytes_list.append(format(byte, '07b'))
+            break
+
+    result = int(''.join(bytes_list), 2)
+    return (result, next_offset)
+
+    
 
 # Record -> row of table
 # https://www.sqlite.org/fileformat.html#record_format
@@ -52,11 +59,12 @@ class Record:
             cur_offset += size
 
         self.root_page:int = int.from_bytes(self.content[3], byteorder = "big")
+        self.create_table_statement = self.content[4].decode('utf-8')
+        print(self.create_table_statement)
         # TODO: Get overflow page number
         # database_file.seek(next_offset)
         # self.overflow_page_number: int = int.from_bytes(database_file.read(4),
         #                                                 byteorder = "big")
-
     def parse_serial(self, serial:int) -> int:
         if serial == 0:
             # Value is a NULL
@@ -120,11 +128,22 @@ def get_row_count_in_table(database_file, table_name):
         record = Record(database_file, offset)
         name = record.content[2].decode("utf-8")
         if name == table_name:
-            page_number = record.root_page - 1 # root page is 1-indexed
+            page_number = record.root_page - 1
             break
     # go to page
     return get_num_tables(database_file, page_number * 4096)
 
+def get_rows_from_table_at_col(database_file, table_name, col_name):
+    cell_offsets = get_cell_offsets(database_file)
+    row_count = 0
+    page_number = 0
+    for offset in cell_offsets:
+        record = Record(database_file, offset)
+        name = record.content[2].decode("utf-8")
+        if name == table_name:
+            page_number = record.root_page - 1
+            break
+    # go to page
 
 database_file_path = sys.argv[1]
 command = sys.argv[2]
@@ -149,9 +168,15 @@ elif command == ".tables":
         table_names = get_table_names(database_file)
         print(f"{' '.join(table_names)}")
 elif "select" in command or "SELECT" in command:
-    with open(database_file_path, "rb") as database_file:
-        table_name = command.split(" ")[-1]
-        print(f"{get_row_count_in_table(database_file, table_name)}")
+    if "count" in command or "COUNT" in command:
+        with open(database_file_path, "rb") as database_file:
+            table_name = command.split(" ")[-1]
+            print(f"{get_row_count_in_table(database_file, table_name)}")
+    else:
+        with open(database_file_path, "rb") as database_file:
+            table_name = command.split(" ")[-1]
+            # Get col from table
+
 else:
     print(f"Invalid command: {command}")
 
