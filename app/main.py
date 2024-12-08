@@ -1,5 +1,6 @@
 import sys
 import sqlparse
+from sqlparse.sql import Identifier
 
 # how to read varint? bitwise operations, read first bit. if it's
 # 1, then the following byte is part of the same varint. if it is
@@ -63,21 +64,30 @@ class Database:
     def table_count(self):
         return self.pages[0].num_cells
 
-    def get_col_values_from_table(self, col, table_name):
+    def get_col_values_from_table(self, col_list, table_name):
         table_metadata = self.table_to_metadata[table_name]
         if table_metadata is None:
             print(f"table not found: {table_name}")
             return []
-        col_index = -1
+        col_indices = []
+        col_names = set([col.value for col in col_list])
         for index, name in enumerate(table_metadata.col_names):
-            if col in name:
-                col_index = index
-                break
-        if col_index == -1:
-            print(f"column not found: {col}")
+            for col in col_names:
+                if col in name:
+                    col_indices.append(index)
+                    col_names.remove(col)
+                    break
+        if len(col_indices) == 0:
+            print(f"no col names with names: {col_names} found")
             return []
         page = self.pages[table_metadata.root_page - 1]
-        return [cell.content[col_index].decode("utf-8") for cell in page.cells]
+        result = []
+        for cell in page.cells:
+            current = []
+            for col_index in col_indices:
+                current.append(cell.content[col_index].decode("utf-8"))
+            result.append("|".join(current))
+        return result 
 
 class TableMetadata:
     def __init__(self, root_page, sql_query):
@@ -212,12 +222,17 @@ elif "select" in command or "SELECT" in command:
             print(f"{database.get_rows_in_table(table_name)}")
     else:
         with open(database_file_path, "rb") as database_file:
+            parsed = sqlparse.parse(command)[0]
+            columns = parsed.tokens[2]
+            col_names = []
+            if isinstance(columns, Identifier):
+                col_names.append(columns)
+            else:
+                col_names = [token for token in parsed.tokens[2].get_identifiers()]
             tokens = command.split(" ")
             table_name = tokens[-1]
-            # Get col from table
-            col_name = tokens[1]
             database = Database(database_file)
-            values = database.get_col_values_from_table(col_name, table_name)
+            values = database.get_col_values_from_table(col_names, table_name)
             print("\n".join(values))
 
 else:
