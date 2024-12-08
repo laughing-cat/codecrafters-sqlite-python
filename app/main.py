@@ -70,7 +70,7 @@ class Database:
             print(f"table not found: {table_name}")
             return []
         col_indices = []
-        col_names = set([col.value for col in col_list])
+        col_names = [col.value for col in col_list]
         for index, name in enumerate(table_metadata.col_names):
             for col in col_names:
                 if col in name:
