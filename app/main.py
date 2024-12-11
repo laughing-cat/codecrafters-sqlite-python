@@ -214,6 +214,7 @@ elif command == ".tables":
         database = Database(database_file)
         table_names = database.table_to_metadata.keys()
         print(f"{' '.join(table_names)}")
+# TODO: Use sqlparse to parse sql commands
 elif "select" in command or "SELECT" in command:
     if "count" in command or "COUNT" in command:
         with open(database_file_path, "rb") as database_file:
@@ -229,6 +230,7 @@ elif "select" in command or "SELECT" in command:
                 col_names.append(columns)
             else:
                 col_names = [token for token in parsed.tokens[2].get_identifiers()]
+            print(parsed)
             tokens = command.split(" ")
             table_name = tokens[-1]
             database = Database(database_file)
