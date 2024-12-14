@@ -1,3 +1,4 @@
+from enum import Enum
 import sys
 import sqlparse
 from sqlparse.sql import Identifier, Where
@@ -25,45 +26,45 @@ def read_varint(stream, bytes_list, offset: int):
 
 # Database file representation: https://www.sqlite.org/fileformat.html
 class Database:
-
-
     def __init__(self, database_file):
-        self.pages = []
+        self.pages = dict()
         self.table_to_metadata = {}
         # parse file header
         database_file.seek(16)  # Skip the first 16 bytes of the header
         self.page_size = int.from_bytes(database_file.read(2), byteorder="big")
         # in-header database size in pages
         database_file.seek(28)
-        self.database_size = int.from_bytes(database_file.read(4),
-                                            byteorder="big")
-        # parse every page
-        for i in range(self.database_size):
-            page_offset = i * self.page_size
-            if page_offset == 0:
-                page_offset = 100
-            page = Page(database_file, page_offset)
-            self.pages.append(page)
-        
-        # parse schema table
-        schema_table = self.pages[0]
-        for cell in schema_table.cells:
+        self.database_size = int.from_bytes(database_file.read(4), byteorder="big")
+
+        # TODO: schema table could be multiple pages too if there are lots of entries
+        self.schema_table = Page(database_file, 100)
+        for cell in self.schema_table.cells:
             name = cell.content[2].decode("utf-8")
             root_page:int = int.from_bytes(cell.content[3], byteorder = "big")
             sql_query = cell.content[4].decode("utf-8")
             self.table_to_metadata[name] = TableMetadata(root_page, sql_query)
 
+        # parse every root page
+        # can't parse every page indiscriminately since not every page is a b-tree page.
+        # Need to parse first page (schema page), and then only parse the root pages of each table
+        # Thus pages needs to be changed to a map
+        for metadata in self.table_to_metadata.values():
+            root_page = metadata.root_page
+            page_offset = (root_page-1) * self.page_size
+            page = Page(database_file, page_offset)
+            self.pages[root_page] = page
     
     def get_rows_in_table(self, table_name):
         table_metadata = self.table_to_metadata[table_name]
         if table_metadata is None:
             print(f"table not found: {table_name}")
             return -1
-        return self.pages[table_metadata.root_page - 1].num_cells
+        return self.pages[table_metadata.root_page].num_cells
 
     def table_count(self):
-        return self.pages[0].num_cells
+        return self.schema_table.num_cells
 
+    
     def get_col_values_from_table(self, col_list, table_name, filters):
         table_metadata = self.table_to_metadata[table_name]
         if table_metadata is None:
@@ -85,20 +86,42 @@ class Database:
         if len(col_indices) == 0:
             print(f"no col names with names: {col_names} found")
             return []
-        page = self.pages[table_metadata.root_page - 1]
+        root_page = self.pages[table_metadata.root_page]
+        # go to root page
+        # if root page is a leaf table, no need to traverse
+        # if root page is an interior table, then need to
+        # perform a binary search(if index is available) or linear to find child page
+        # continue until a leaf table page is found
+
+        page_stack = [root_page]
         result = []
-        filter = filters[0] if len(filters) > 0 else (None,None)
-        filter_value = filter[1]
-        for cell in page.cells:
-            if filter_index is not None:
-                value = cell.content[filter_index].decode("utf-8")
-                if value != filter_value: continue
-            current = []
-            for col_index in col_indices:
-                curr_value = cell.content[col_index].decode("utf-8")
-                current.append(curr_value)
-            result.append("|".join(current))
-        return result 
+        while len(page_stack) > 0:
+            page = page_stack.pop()
+            #TODO: handle cell overflow
+            if page.page_type == PageType.LEAF_TABLE:
+                filter = filters[0] if len(filters) > 0 else (None,None)
+                filter_value = filter[1]
+                for cell in page.cells:
+                    if filter_index is not None:
+                        value = cell.content[filter_index].decode("utf-8")
+                        if value != filter_value: continue
+                    current = []
+                    for col_index in col_indices:
+                        curr_value = cell.content[col_index].decode("utf-8")
+                        if col_index == 0:
+                            # id col is stored in row_id
+                            curr_value = str(cell.row_id)
+                        current.append(curr_value)
+                    result.append("|".join(current))
+            elif page.page_type == PageType.INTERIOR_TABLE:
+                # Push all child pages onto the stack, linear search
+                # TODO: binary search if index is available
+                for cell in page.cells:
+                    page_offset = (cell.left_child_pointer - 1) * self.page_size
+                    child_page = Page(database_file, page_offset)
+                    page_stack.append(child_page)
+
+        return result
 
 class TableMetadata:
     def __init__(self, root_page, sql_query):
@@ -107,11 +130,22 @@ class TableMetadata:
         query = sqlparse.parse(self.sql_query)[0]
         self.col_names = query[-1].value.split(',')
 
+class PageType(Enum):
+    INTERIOR_INDEX = 2
+    INTERIOR_TABLE = 5
+    LEAF_INDEX = 10
+    LEAF_TABLE = 13
+
 class Page:
     def __init__(self, database_file, page_offset):
         self.cells = []
         database_file.seek(page_offset)
-        self.page_type = int.from_bytes(database_file.read(1), byteorder='big')
+        try:
+            self.page_type = PageType(int.from_bytes(database_file.read(1),
+                                                     byteorder='big'))
+        except:
+            print("Not a b-tree page.")
+            return
         self.first_freeblock = int.from_bytes(database_file.read(2),
                                               byteorder='big')
         self.num_cells = int.from_bytes(database_file.read(2), byteorder='big')
@@ -120,6 +154,8 @@ class Page:
             self.start_content = 65536
         self.free_bytes = int.from_bytes(database_file.read(1), byteorder='big')
         # TODO: parse right-most pointer here if interior b-tree page
+        if self.page_type == PageType.INTERIOR_TABLE:
+            self.rightmost_pointer = int.from_bytes(database_file.read(4), byteorder='big')
         
         # parse cells of page
         cell_offsets = [int.from_bytes(database_file.read(2), byteorder="big")
@@ -130,11 +166,23 @@ class Page:
             if page_offset != 100:
                 offset += page_offset
             database_file.seek(offset)
-            record = Record(database_file, offset)
-            self.cells.append(record)
+            cell = None
+            if self.page_type == PageType.LEAF_TABLE or self.page_type == PageType.INTERIOR_INDEX:
+                cell = Record(database_file, offset)
+            elif self.page_type == PageType.INTERIOR_TABLE:
+                cell = InteriorTableCell(database_file, offset)
+            self.cells.append(cell)
         
 
-# Record -> row of table
+class InteriorTableCell:
+    def __init__(self, database_file, cell_offset):
+        self.offset: int = cell_offset
+        database_file.seek(cell_offset)
+        self.left_child_pointer: int = int.from_bytes(database_file.read(4), byteorder="big")
+        integer_key, next_offset = read_varint(database_file, [], cell_offset + 4)
+        self.integer_key: int = integer_key
+
+# Record -> row of table for table b-tree data or index b-tree keys
 # https://www.sqlite.org/fileformat.html#record_format
 class Record:
     # Currently assumes the cell is a table B-Tree Leaf Cell
@@ -161,6 +209,7 @@ class Record:
         while cur_offset - record_offset < record_header_size:
             # read next varint, parse serial type to get content_size
             next_serial, cur_offset = read_varint(database_file, [], cur_offset)
+            # TODO: handle int values, not just strings
             content_size = self.parse_serial(next_serial)
             self.column_sizes.append(content_size)
 
@@ -218,6 +267,7 @@ if command == ".dbinfo":
         num_tables = database.table_count()
 
         print(f"database page size: {page_size}")
+        print(f"number of pages {database.database_size}")
         print(f"number of tables: {num_tables}")
 
 elif command == ".tables":
