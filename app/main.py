@@ -1,6 +1,6 @@
 import sys
 import sqlparse
-from sqlparse.sql import Identifier
+from sqlparse.sql import Identifier, Where
 
 # how to read varint? bitwise operations, read first bit. if it's
 # 1, then the following byte is part of the same varint. if it is
@@ -64,28 +64,39 @@ class Database:
     def table_count(self):
         return self.pages[0].num_cells
 
-    def get_col_values_from_table(self, col_list, table_name):
+    def get_col_values_from_table(self, col_list, table_name, filters):
         table_metadata = self.table_to_metadata[table_name]
         if table_metadata is None:
             print(f"table not found: {table_name}")
             return []
         col_indices = []
         col_names = [col.value for col in col_list]
-        for index, name in enumerate(table_metadata.col_names):
-            for col in col_names:
+        filter_index = None
+        for col in col_names:
+            for index, name in enumerate(table_metadata.col_names):
                 if col in name:
                     col_indices.append(index)
-                    col_names.remove(col)
                     break
+
+        for index, name in enumerate(table_metadata.col_names):
+            for filter in filters:
+                if filter[0] in name:
+                    filter_index = index
         if len(col_indices) == 0:
             print(f"no col names with names: {col_names} found")
             return []
         page = self.pages[table_metadata.root_page - 1]
         result = []
+        filter = filters[0] if len(filters) > 0 else (None,None)
+        filter_value = filter[1]
         for cell in page.cells:
+            if filter_index is not None:
+                value = cell.content[filter_index].decode("utf-8")
+                if value != filter_value: continue
             current = []
             for col_index in col_indices:
-                current.append(cell.content[col_index].decode("utf-8"))
+                curr_value = cell.content[col_index].decode("utf-8")
+                current.append(curr_value)
             result.append("|".join(current))
         return result 
 
@@ -230,11 +241,19 @@ elif "select" in command or "SELECT" in command:
                 col_names.append(columns)
             else:
                 col_names = [token for token in parsed.tokens[2].get_identifiers()]
-            print(parsed)
+            last_token = parsed.token_prev(len(parsed.tokens))
             tokens = command.split(" ")
             table_name = tokens[-1]
+            filters = []
+            if isinstance(last_token, tuple) and isinstance(last_token[1],Where):
+                where_tokens = [token for token in last_token[1].flatten()]
+                col_filter = where_tokens[2].value
+                filter_value = where_tokens[-1].value.replace("\'", "")
+                filters.append((col_filter, filter_value))
+                #TODO: fix the typing, this should always be a tuple though
+                table_name = parsed.token_prev(len(parsed.tokens) - 1)[1].value
             database = Database(database_file)
-            values = database.get_col_values_from_table(col_names, table_name)
+            values = database.get_col_values_from_table(col_names, table_name, filters)
             print("\n".join(values))
 
 else:
